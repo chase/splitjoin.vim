@@ -1,3 +1,11 @@
+function! s:isFunction(oneLine)
+  if a:oneLine
+    return getline('.') =~ '\<function\>[^(]*(.*)\s*{.*}\|(.*)\s*=>\s*{.*}'
+  else
+    return getline('.') =~ '\<function\>[^(]*(.*)\s*{\|(.*)\s*=>\s*{'
+  endif
+endfunction
+
 function! sj#js#SplitObjectLiteral()
   let [from, to] = sj#LocateBracesOnLine('{', '}')
 
@@ -6,6 +14,9 @@ function! sj#js#SplitObjectLiteral()
   else
     let pairs = sj#ParseJsonObjectBody(from + 1, to - 1)
     let body  = "{\n".join(pairs, ",\n")."\n}"
+    if sj#settings#Read('trailing_comma') && !s:isFunction(0)
+      let body = substitute(body, ',\?\n}', ',\n}', '')
+    endif
     call sj#ReplaceMotion('Va{', body)
 
     if sj#settings#Read('align')
@@ -19,7 +30,7 @@ function! sj#js#SplitObjectLiteral()
 endfunction
 
 function! sj#js#SplitFunction()
-  if expand('<cword>') == 'function' && getline('.') =~ '\<function\>.*(.*)\s*{.*}'
+  if expand('<cword>') == 'function' && s:isFunction(1)
     normal! f{
     return sj#js#SplitObjectLiteral()
   else
@@ -37,10 +48,15 @@ function! sj#js#JoinObjectLiteral()
     let lines = split(body, "\n")
     let lines = sj#TrimList(lines)
     if sj#settings#Read('normalize_whitespace')
+      let lines = map(lines, 'substitute(v:val, ",\\s\\{2,}", ", ", "")')
       let lines = map(lines, 'substitute(v:val, ":\\s\\+", ": ", "")')
     endif
 
     let body = join(lines, ' ')
+    if sj#settings#Read('trailing_comma')
+      let body = substitute(body, ',\?$', '', '')
+    endif
+
     let body = '{'.body.'}'
 
     call sj#ReplaceMotion('Va{', body)
@@ -71,22 +87,33 @@ function! sj#js#JoinFunction()
   endif
 endfunction
 
-function! s:SplitList(delimiter)
-  let start = a:delimiter[0]
-  let end   = a:delimiter[1]
+function! s:SplitList(regex, opening_char, closing_char, no_trail)
+  if sj#SearchUnderCursor(a:regex) <= 0
+    return 0
+  endif
+
+  call sj#PushCursor()
 
   let lineno = line('.')
   let indent = indent('.')
 
-  let [from, to] = sj#LocateBracesOnLine(start, end)
+  " TODO (2012-10-24) connect sj#SearchUnderCursor and sj#LocateBracesOnLine
+  normal! l
+  let start = col('.')
+  normal! h%h
+  let end = col('.')
 
-  if from < 0 && to < 0
-    return 0
+  let items = sj#ParseJsonObjectBody(start, end)
+
+  if sj#settings#Read('trailing_comma') && !a:no_trail
+    let body = a:opening_char."\n".join(items, ",\n").",\n".a:closing_char
+  else
+    let body = a:opening_char."\n".join(items, ",\n")."\n".a:closing_char
   endif
 
-  let items = sj#ParseJsonObjectBody(from + 1, to - 1)
-  let body  = start."\n".join(items, ",\n")."\n".end
-  call sj#ReplaceMotion('Va'.start, body)
+  call sj#PopCursor()
+
+  call sj#ReplaceMotion('va'.a:opening_char, body)
 
   " built-in js indenting doesn't indent this properly
   for l in range(lineno + 1, lineno + len(items))
@@ -100,42 +127,43 @@ function! s:SplitList(delimiter)
 endfunction
 
 function! sj#js#SplitArray()
-  return s:SplitList(['[', ']'])
+  return s:SplitList('\[[^]]*]', '[', ']', 0)
 endfunction
 
 function! sj#js#SplitArgs()
-  return s:SplitList(['(', ')'])
-endfunction
-
-function! s:JoinList(delimiter)
-  let start = a:delimiter[0]
-  let end   = a:delimiter[1]
-
-  let line = getline('.')
-
-  if line !~ start . '\s*$'
+  " Don't split a function declaration's args
+  if s:isFunction(0)
     return 0
   endif
 
-  call search(start, 'c', line('.'))
-  let body = sj#GetMotion('Vi'.start)
+  return s:SplitList('([^)]*)', '(', ')', 1)
+endfunction
 
-  let lines = split(body, "\n")
-  let lines = sj#TrimList(lines)
-  let body  = sj#Trim(join(lines, ' '))
-  let body  = substitute(body, ',\s*$', '', '')
+function! s:JoinList(regex, opening_char, closing_char)
+  if sj#SearchUnderCursor(a:regex) <= 0
+    return 0
+  endif
 
-  call sj#ReplaceMotion('Va'.start, start.body.end)
+  let body = sj#GetMotion('va'.a:opening_char)
+  let body = substitute(body, '\_s\+', ' ', 'g')
+  let body = substitute(body, '^'.a:opening_char.'\s\+', a:opening_char, '')
+  if sj#settings#Read('trailing_comma')
+    let body = substitute(body, ',\?\s\+'.a:closing_char.'$', a:closing_char, '')
+  else
+    let body = substitute(body, '\s\+'.a:closing_char.'$', a:closing_char, '')
+  endif
+
+  call sj#ReplaceMotion('va'.a:opening_char, body)
 
   return 1
 endfunction
 
 function! sj#js#JoinArray()
-  return s:JoinList(['[', ']'])
+  return s:JoinList('\[[^]]*\s*$', '[', ']')
 endfunction
 
 function! sj#js#JoinArgs()
-  return s:JoinList(['(', ')'])
+  return s:JoinList('([^)]*\s*$', '(', ')')
 endfunction
 
 function! sj#js#SplitOneLineIf()
